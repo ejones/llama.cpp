@@ -210,8 +210,8 @@ int main(int argc, char ** argv) {
         params.antiprompt.push_back("### Instruction:\n\n");
     }
 
-    // enable interactive mode if reverse prompt or interactive start is specified
-    if (params.antiprompt.size() != 0 || params.interactive_first) {
+    // enable interactive mode if interactive start is specified
+    if (params.interactive_first) {
         params.interactive = true;
     }
 
@@ -251,12 +251,6 @@ int main(int argc, char ** argv) {
 
         fprintf(stderr, "%s: interactive mode on.\n", __func__);
 
-        if (params.antiprompt.size()) {
-            for (auto antiprompt : params.antiprompt) {
-                fprintf(stderr, "Reverse prompt: '%s'\n", antiprompt.c_str());
-            }
-        }
-
         if (!params.input_prefix.empty()) {
             fprintf(stderr, "Input prefix: '%s'\n", params.input_prefix.c_str());
         }
@@ -265,6 +259,12 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "Input suffix: '%s'\n", params.input_suffix.c_str());
         }
     }
+    if (params.antiprompt.size()) {
+        for (auto antiprompt : params.antiprompt) {
+            fprintf(stderr, "Reverse prompt: '%s'\n", antiprompt.c_str());
+        }
+    }
+
     fprintf(stderr, "sampling: repeat_last_n = %d, repeat_penalty = %f, presence_penalty = %f, frequency_penalty = %f, top_k = %d, tfs_z = %f, top_p = %f, typical_p = %f, temp = %f, mirostat = %d, mirostat_lr = %f, mirostat_ent = %f\n",
             params.repeat_last_n, params.repeat_penalty, params.presence_penalty, params.frequency_penalty, params.top_k, params.tfs_z, params.top_p, params.typical_p, params.temp, params.mirostat, params.mirostat_eta, params.mirostat_tau);
     fprintf(stderr, "generate: n_ctx = %d, n_batch = %d, n_predict = %d, n_keep = %d\n", n_ctx, params.n_batch, params.n_predict, params.n_keep);
@@ -501,29 +501,33 @@ int main(int argc, char ** argv) {
             set_console_color(con_st, CONSOLE_COLOR_DEFAULT);
         }
 
+        // check for reverse prompt
+        if (params.antiprompt.size()) {
+            std::string last_output;
+            for (auto id : last_n_tokens) {
+                last_output += llama_token_to_str(ctx, id);
+            }
+
+            is_antiprompt = false;
+            // Check if each of the reverse prompts appears at the end of the output.
+            for (std::string & antiprompt : params.antiprompt) {
+                if (last_output.find(antiprompt.c_str(), last_output.length() - antiprompt.length(), antiprompt.length()) != std::string::npos) {
+                    is_interacting = params.interactive;
+                    is_antiprompt = true;
+                    set_console_color(con_st, CONSOLE_COLOR_USER_INPUT);
+                    fflush(stdout);
+                    break;
+                }
+            }
+        }
+
+        if (!params.interactive && is_antiprompt) {
+            break;
+        }
+
         // in interactive mode, and not currently processing queued inputs;
         // check if we should prompt the user for more
         if (params.interactive && (int) embd_inp.size() <= n_consumed) {
-
-            // check for reverse prompt
-            if (params.antiprompt.size()) {
-                std::string last_output;
-                for (auto id : last_n_tokens) {
-                    last_output += llama_token_to_str(ctx, id);
-                }
-
-                is_antiprompt = false;
-                // Check if each of the reverse prompts appears at the end of the output.
-                for (std::string & antiprompt : params.antiprompt) {
-                    if (last_output.find(antiprompt.c_str(), last_output.length() - antiprompt.length(), antiprompt.length()) != std::string::npos) {
-                        is_interacting = true;
-                        is_antiprompt = true;
-                        set_console_color(con_st, CONSOLE_COLOR_USER_INPUT);
-                        fflush(stdout);
-                        break;
-                    }
-                }
-            }
 
             if (n_past > 0 && is_interacting) {
                 // potentially set color to indicate we are taking user input

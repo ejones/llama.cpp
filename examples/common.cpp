@@ -360,8 +360,8 @@ void gpt_print_usage(int /*argc*/, char ** argv, const gpt_params & params) {
     fprintf(stderr, "  --interactive-first   run in interactive mode and wait for input right away\n");
     fprintf(stderr, "  -ins, --instruct      run in instruction mode (use with Alpaca models)\n");
     fprintf(stderr, "  -r PROMPT, --reverse-prompt PROMPT\n");
-    fprintf(stderr, "                        run in interactive mode and poll user input upon seeing PROMPT (can be\n");
-    fprintf(stderr, "                        specified more than once for multiple prompts).\n");
+    fprintf(stderr, "                        stop generating text on seein PROMPT (can be specified more than once\n");
+    fprintf(stderr, "                        for multiple prompts).\n");
     fprintf(stderr, "  --color               colorise output to distinguish prompt and user input from generations\n");
     fprintf(stderr, "  -s SEED, --seed SEED  RNG seed (default: -1, use random seed for < 0)\n");
     fprintf(stderr, "  -t N, --threads N     number of threads to use during computation (default: %d)\n", params.n_threads);
