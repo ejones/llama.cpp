@@ -1,14 +1,15 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
 cd "$(dirname "$0")/.." || exit
 
-if [[ -z "$PROMPT_CACHE_FILE" || -z "$CHAT_SAVE_DIR" ]]; then
+if [[ -z "${PROMPT_CACHE_FILE+x}" || -z "${CHAT_SAVE_DIR+x}" ]]; then
     echo >&2 "error: PROMPT_CACHE_FILE and CHAT_SAVE_DIR must be provided"
     exit 1
 fi
 
+MODEL="${MODEL:-./models/13B/ggml-model-q4_0.bin}"
 PROMPT_TEMPLATE="${PROMPT_TEMPLATE:-./prompts/chat.txt}"
 USER_NAME="${USER_NAME:-User}"
 AI_NAME="${AI_NAME:-ChatLLaMa}"
@@ -22,15 +23,23 @@ CUR_PROMPT_CACHE="${CHAT_SAVE_DIR}/current-cache.bin"
 NEXT_PROMPT_FILE="${CHAT_SAVE_DIR}/next-prompt.txt"
 NEXT_PROMPT_CACHE="${CHAT_SAVE_DIR}/next-cache.bin"
 
-PROMPT_EVAL_MSG_PATTERN='prompt eval time =\s+\d+.\d+ ms /\s+\d+ tokens' 
+SESSION_SIZE_MSG_PATTERN='main: session file matches \d+ / \d+'
+SAMPLE_TIME_MSG_PATTERN='sample time =\s+\d+.\d+ ms /\s+\d+' 
 
 CTX_SIZE=2048
 CTX_ROTATE_POINT=$((CTX_SIZE * 3 / 5)) # REVIEW
-OPTS=(--model ./models/13B/ggml-model-q4_0.bin --ctx_size "$CTX_SIZE" --repeat_last_n 256 "$@")
+OPTS=(--model "$MODEL" --ctx_size "$CTX_SIZE" --repeat_last_n 256 "$@")
+
+skip_bytes() {
+    LANG=C IFS= read -r -n "$1" -d '' c
+    while LANG=C IFS= read -r -n 1 -d '' c; do
+        printf '%s' "$c"
+    done
+}
 
 mkdir -p "$CHAT_SAVE_DIR"
 echo >"$LOG"
-trap "tail -n50 ${LOG}" EXIT
+trap "tail -n100 ${LOG}" EXIT
 
 if [[ ! -e "$CUR_PROMPT_FILE" ]]; then
     sed -e "s/\[\[USER_NAME\]\]/${USER_NAME}/g" \
@@ -57,57 +66,51 @@ fi
 if [[ ! -e "$CUR_PROMPT_CACHE" ]]; then
     cp "$PROMPT_CACHE_FILE" "$CUR_PROMPT_CACHE"
 fi
+cp "$PROMPT_CACHE_FILE" "$NEXT_PROMPT_CACHE"
 
-# TODO: strip newline at end
-cat "$CUR_PROMPT_FILE"
+printf '%s ' "$(< "$CUR_PROMPT_FILE")"
 n_tokens=0
 
-while read line; do
-    printf '%s: ' "$AI_NAME"
-    printf '%s\n%s: ' "$line" "$AI_NAME" >>"$CUR_PROMPT_FILE"
-
-    output=""
-    while ((n_tokens + 10 < CTX_SIZE)); do
-        prompt_len=$(($(wc -c <"$CUR_PROMPT_FILE") - 1))
-        prompt_and_chunk="$(
-            ./main 2>>"$LOG" "${OPTS[@]}" \
-                --prompt-cache "$CUR_PROMPT_CACHE" \
-                --prompt-cache-all \
-                --file "$CUR_PROMPT_FILE" \
-                --n_predict 5
-        )"
-        chunk="${prompt_and_chunk:${prompt_len}}"
-        raw_output="${output}${chunk}"
-        output="$(sed "/^${USER_NAME}:/,\$d" <<<"$raw_output")"
-
-        is_done=0
-        if [[ "$raw_output" != "$output" ]]; then
-            output="${output}"$'\n'"${USER_NAME}:"
-            chunk="${chunk%:*}: "
-            is_done=1
-        fi
-
-        printf '%s' "$chunk"
-        printf '%s' "$chunk" >>"$CUR_PROMPT_FILE"
-
-        # HACK get # tokens from debug message
-        if ! prompt_eval_msg="$(tail -n10 "$LOG" | grep -oE "$PROMPT_EVAL_MSG_PATTERN")"; then
-            echo >&2 "Couldn't get number of prompt tokens!"
-            exit 1
-        fi
-
-        n_tokens=$((5 + $(awk '{print $8}' <<<"$prompt_eval_msg")))
-
-        if [[ "$is_done" == 1 ]]; then
-            break
-        fi
-    done
-
+while read -e line; do
+    echo " ${line}" >>"$CUR_PROMPT_FILE"
     if ((n_tokens > CTX_ROTATE_POINT)); then
-        tail -c+$((orig_prompt_len)) "$CUR_PROMPT_FILE" >>"$NEXT_PROMPT_FILE"
+        echo " ${line}" >>"$NEXT_PROMPT_FILE"
     fi
 
-    if ((n_tokens + 10 > CTX_SIZE)); then
+    n_prompt_len_pre=$(($(wc -c <"$CUR_PROMPT_FILE")))
+    n_predict=$((CTX_SIZE - n_tokens - 4))
+
+    printf '%s: ' "$AI_NAME" >>"$CUR_PROMPT_FILE"
+
+    ./main 2>>"$LOG" "${OPTS[@]}" \
+            --prompt-cache "$CUR_PROMPT_CACHE" \
+            --prompt-cache-all \
+            --file "$CUR_PROMPT_FILE" \
+            --reverse-prompt "${USER_NAME}:" \
+            --n_predict "$n_predict" |
+        skip_bytes 1 | # main prepends + outputs BOS token at start
+        tee "$CUR_PROMPT_FILE.tmp" |
+        skip_bytes "$n_prompt_len_pre"
+
+    printf ' '
+
+    mv "$CUR_PROMPT_FILE.tmp" "$CUR_PROMPT_FILE"
+
+    # TODO get both messages in one go
+    # HACK get # tokens from debug message
+    if  ! session_size_msg="$(tail -n30 "$LOG" | grep -oE "$SESSION_SIZE_MSG_PATTERN")" ||
+        ! sample_time_msg="$( tail -n10 "$LOG" | grep -oE "$SAMPLE_TIME_MSG_PATTERN")"; then
+        echo >&2 "Couldn't get number of tokens from ./main output!"
+        exit 1
+    fi
+
+    n_tokens=$(($(cut -d/ -f2 <<<"$session_size_msg") + $(cut -d/ -f2 <<<"$sample_time_msg")))
+
+    if ((n_tokens > CTX_ROTATE_POINT)); then
+        tail -c+$((n_prompt_len_pre + 1)) "$CUR_PROMPT_FILE" >>"$NEXT_PROMPT_FILE"
+    fi
+
+    if ((n_tokens + 16 > CTX_SIZE)); then
         echo
         echo "--- CONTEXT SWAP ---"
         cat "$NEXT_PROMPT_FILE"
@@ -116,6 +119,13 @@ while read line; do
         wait
         mv "$NEXT_PROMPT_FILE"  "$CUR_PROMPT_FILE"
         mv "$NEXT_PROMPT_CACHE" "$CUR_PROMPT_CACHE"
+
+        # TODO avoid duplication from above to init next prompt
+        sed -r '/^('"$USER_NAME"':|'"$AI_NAME"':|\.\.\.)/,$d' "$CUR_PROMPT_FILE" >"$NEXT_PROMPT_FILE"
+        echo '...' >>"$NEXT_PROMPT_FILE"
+        cp "$PROMPT_CACHE_FILE" "$NEXT_PROMPT_CACHE"
+
+        n_tokens=0
     fi
 
     ./main >>"$LOG_BG" 2>&1 "${OPTS[@]}" \
