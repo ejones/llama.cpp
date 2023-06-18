@@ -2435,13 +2435,23 @@ llama_token llama_sample_token(struct llama_context * ctx, llama_token_data_arra
     return result;
 }
 
-llama_token llama_grammar_accept_token(struct llama_context * ctx, struct llama_grammar * grammar, llama_token token) {
+int llama_grammar_accept_token(
+        struct llama_context * ctx,
+        struct llama_grammar * grammar,
+                 llama_token   token,
+                 llama_token * out_tokens,
+                         int   n_max_tokens) {
     const int64_t t_start_sample_us = ggml_time_us();
 
     if (token == llama_token_eos()) {
         for (const auto & stack : grammar->stacks) {
             if (stack.empty()) {
-                return token;
+                if (n_max_tokens > 0) {
+                    *out_tokens = token;
+                    return 1;
+                } else {
+                    return 0;
+                }
             }
         }
         LLAMA_ASSERT(false);
@@ -2466,7 +2476,12 @@ llama_token llama_grammar_accept_token(struct llama_context * ctx, struct llama_
     // if full token is matched, accept new stacks
     if (!(*suffix)) {
         grammar->stacks = new_stacks;
-        return token;
+        if (n_max_tokens > 0) {
+            *out_tokens = token;
+            return 1;
+        } else {
+            return 0;
+        }
     }
 
     // otherwise, tokenize the string prefix that did match

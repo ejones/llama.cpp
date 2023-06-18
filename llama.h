@@ -313,8 +313,17 @@ extern "C" {
     /// @details Randomly selects a token from the candidates based on their probabilities.
     LLAMA_API llama_token llama_sample_token(struct llama_context * ctx, llama_token_data_array * candidates);
 
-    /// @details Accepts the sampled token into the grammar, possibly transforming to a new token
-    LLAMA_API llama_token llama_grammar_accept_token(struct llama_context * ctx, struct llama_grammar * grammar, llama_token token);
+    /// @details Accepts the sampled token into the grammar (or a prefix of it), possibly
+    /// transforming it into one or more new tokens
+    /// @param tokens must be large enough to hold the resulting tokens.
+    /// @return the number of tokens on success, no more than n_max_tokens. A negative number on
+    /// failure - the number of tokens that would have been returned
+    LLAMA_API int llama_grammar_accept_token(
+            struct llama_context * ctx,
+            struct llama_grammar * grammar,
+                     llama_token   token,
+                     llama_token * out_tokens,
+                             int   n_max_tokens);
 
     // Performance information
     LLAMA_API void llama_print_timings(struct llama_context * ctx);
