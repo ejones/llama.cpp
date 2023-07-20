@@ -1900,6 +1900,11 @@ struct llama_grammar {
     std::vector<std::vector<const llama_grammar_element *>> stacks;
 };
 
+struct llama_partial_token {
+    size_t       index;
+    const char * str;
+};
+
 // NOTE: assumes valid utf8 (but checks for overrun)
 std::pair<uint32_t, const char *> decode_utf8(const char * src) {
     static const int lookup[] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 3, 4 };
@@ -2037,23 +2042,85 @@ static std::vector<std::vector<const llama_grammar_element *>> llama_grammar_acc
     return new_stacks;
 }
 
-// returns `true` if one of the pushdown stacks can accept the given char.
-static bool llama_grammar_peek(
+static std::vector<llama_partial_token> llama_grammar_reject_candidates(
+        const std::vector<std::vector<llama_grammar_element>>         & rules,
         const std::vector<std::vector<const llama_grammar_element *>> & stacks,
-        const uint32_t                                                  chr) {
+        const std::vector<llama_partial_token>                        & candidates,
+        size_t                                                          offset);
 
-    for (const auto & stack : stacks) {
-        if (stack.empty()) {
-            if (!chr) {
-                return true;
+static std::vector<llama_partial_token> llama_grammar_reject_candidates_for_stack(
+        const std::vector<std::vector<llama_grammar_element>> & rules,
+        const std::vector<const llama_grammar_element *>      & stack,
+        const std::vector<llama_partial_token>                & candidates,
+        size_t                                                  offset) {
+
+    std::vector<llama_partial_token>  rejects;
+
+    if (stack.empty()) {
+        // REVIEW - handle empty stack (EOS) separately
+        rejects.insert(rejects.end(), candidates.begin(), candidates.end());
+        return rejects;
+    }
+
+    const llama_grammar_element * stack_pos = stack.back();
+
+    std::vector<llama_partial_token> next_candidates;
+    for (auto ptok : candidates) {
+        uint32_t     chr;
+        const char * str = ptok.str;
+        for (size_t i = 0; i <= offset; ++i) {
+            LLAMA_ASSERT(*str != 0);
+            auto decoded = decode_utf8(str);
+            chr = decoded.first;
+            str = decoded.second;
+        }
+        if (llama_grammar_match_char(stack_pos, chr).first) {
+            if (*str != 0) {
+                next_candidates.push_back(ptok);
             }
-        } else if (llama_grammar_match_char(stack.back(), chr).first) {
-            return true;
+        } else {
+            rejects.push_back(ptok);
         }
     }
-    return false;
+
+    stack_pos = llama_grammar_match_char(stack_pos, 0).second;
+
+    // update top of stack to next element, if any
+    std::vector<const llama_grammar_element *> new_stack(stack.begin(), stack.end() - 1);
+    if (!llama_grammar_is_end_of_sequence(stack_pos)) {
+        new_stack.push_back(stack_pos);
+    }
+    std::vector<std::vector<const llama_grammar_element *>> new_stacks;
+    llama_grammar_advance_stack(rules, new_stack, new_stacks);
+
+    auto next_rejects =
+        llama_grammar_reject_candidates(rules, new_stacks, next_candidates, offset + 1);
+
+    rejects.insert(rejects.end(), next_rejects.begin(), next_rejects.end());
+    return rejects;
 }
 
+static std::vector<llama_partial_token> llama_grammar_reject_candidates(
+        const std::vector<std::vector<llama_grammar_element>>         & rules,
+        const std::vector<std::vector<const llama_grammar_element *>> & stacks,
+        const std::vector<llama_partial_token>                        & candidates,
+        size_t                                                          offset) {
+
+    LLAMA_ASSERT(!stacks.empty()); // REVIEW
+
+    if (candidates.empty()) {
+        return std::vector<llama_partial_token>();
+    }
+    
+    auto rejects =
+        llama_grammar_reject_candidates_for_stack(rules, stacks.front(), candidates, offset);
+
+    for (size_t i = 1, size = stacks.size(); i < size; ++i) {
+        rejects = llama_grammar_reject_candidates_for_stack(rules, stacks[i], rejects, offset);
+    }
+
+    return rejects;
+}
 
 //
 // grammar - external
@@ -2383,32 +2450,36 @@ void llama_sample_grammar(struct llama_context * ctx, llama_token_data_array * c
     assert(ctx);
     const int64_t     t_start_sample_us  = ggml_time_us();
     const llama_token eos                = llama_token_eos();
-    // since many llama tokens are prefixed with a single space, special case a lookahead on ' '
-    const auto        stacks_after_space = llama_grammar_accept(grammar->rules, grammar->stacks, U' ');
+
+    bool has_eos = false;
+    for (const auto & stack : grammar->stacks) {
+        if (stack.empty()) {
+            has_eos = true;
+            break;
+        }
+    }
+
+    std::vector<llama_partial_token> grammar_candidates;
 
     for (size_t i = 0; i < candidates->size; ++i) {
-        const llama_token id    = candidates->data[i].id;
-        const char *      str   = llama_token_to_str(ctx, id);
-
-        // prune tokens based on first char only - in `llama_grammar_accept_token` we will find the
-        // full matching prefix of the selected token
-        bool valid = false;
+        const llama_token id  = candidates->data[i].id;
+        const char *      str = llama_token_to_str(ctx, id);
         if (id == eos) {
-            valid = llama_grammar_peek(grammar->stacks, 0);
-        } else {
-            const auto       decoded = decode_utf8(str);
-            const uint32_t   chr     = decoded.first;
-            if (chr == U' ') {
-                const char * next = decoded.second;
-                valid = llama_grammar_peek(stacks_after_space, decode_utf8(next).first);
-            } else if (chr != 0) {
-                valid = llama_grammar_peek(grammar->stacks, chr);
+            if (!has_eos) {
+                candidates->data[i].logit = -INFINITY;
             }
-        }
-
-        if (!valid) {
+        } else if (*str != 0) {
+            grammar_candidates.push_back({ i, str });
+        } else {
             candidates->data[i].logit = -INFINITY;
         }
+    }
+
+    auto rejects =
+        llama_grammar_reject_candidates(grammar->rules, grammar->stacks, grammar_candidates, 0);
+
+    for (auto tok : rejects) {
+        candidates->data[tok.index].logit = -INFINITY;
     }
 
     ctx->t_sample_us += ggml_time_us() - t_start_sample_us;
@@ -2612,48 +2683,17 @@ llama_token llama_grammar_accept_token(struct llama_context * ctx, struct llama_
     }
 
     const char * str    = llama_token_to_str(ctx, token);
-    const char * suffix = str;
+    LLAMA_ASSERT(*str);
 
-    // Find prefix of selected token that matches grammar, expecting at least 1 char
-    auto  decoded    = decode_utf8(suffix);
-    auto  new_stacks = llama_grammar_accept(grammar->rules, grammar->stacks, decoded.first);
-    LLAMA_ASSERT(!new_stacks.empty());
-    if (*suffix) {
-        suffix = decoded.second;
-        for ( ; *suffix; suffix = decoded.second) {
-            decoded    = decode_utf8(suffix);
-            new_stacks = llama_grammar_accept(grammar->rules, new_stacks, decoded.first);
-            if (new_stacks.empty() ) {
-                break;
-            }
-        }
-    }
-
-    // if full token is matched, accept new stacks
-    if (!(*suffix)) {
-        grammar->stacks = new_stacks;
-        return token;
-    }
-
-    // otherwise, tokenize the string prefix that did match
-    llama_token tokens[32]; // TODO - determine actual max token size
-    const std::string prefix_str(str, suffix - str);
-    int n_tokens = llama_tokenize(ctx, prefix_str.c_str(), tokens, 32, false);
-    if (n_tokens < 1) {
-        return token; // REVIEW
-    }
-
-    // accept the first token of the matching prefix into the grammar
-    llama_token first_prefix_token = tokens[0];
-    const char * first_prefix_str = llama_token_to_str(ctx, first_prefix_token);
-    for ( ; *first_prefix_str; first_prefix_str = decoded.second) {
-        decoded         = decode_utf8(first_prefix_str);
+    while (*str) {
+        auto decoded = decode_utf8(str);
         grammar->stacks = llama_grammar_accept(grammar->rules, grammar->stacks, decoded.first);
-        LLAMA_ASSERT(!grammar->stacks.empty());
+        str             = decoded.second;
     }
+    LLAMA_ASSERT(!grammar->stacks.empty());
 
     ctx->t_sample_us += ggml_time_us() - t_start_sample_us;
-    return first_prefix_token;
+    return token;
 }
 
 //
