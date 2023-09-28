@@ -1,0 +1,19 @@
+# GBNF grammar for GBNF
+# Note that this is more restrictive than the true grammar
+
+root         ::= ((rule | comment) "\n"?)+
+
+rule         ::= non-terminal "::=" ws alternates "\n"
+
+alternates   ::= sequence ("|" ws sequence)*
+sequence     ::= ((terminal | non-terminal | "(" alternates ")" ws) ([*?+] ws)?)+
+
+non-terminal ::= [0-9A-Za-z-]+ ws
+terminal     ::= "\"" (escape | [^"\\])* "\"" ws | "[" "^"? range+ "]" ws
+range        ::= class-char ("-" class-char)?
+class-char   ::= escape | [^\]\\]
+escape       ::= "\\" ([trn\\"\[\]] | "x" byte | "u" byte byte | "U" byte byte byte byte)
+byte         ::= [0-9A-Fa-f] [0-9A-Fa-f]
+
+comment      ::= "#" [^\n]* "\n"
+ws           ::= " "
