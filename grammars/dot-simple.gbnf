@@ -1,0 +1,9 @@
+root  ::= "di"? "graph {\n" stmt* "}"
+stmt  ::=
+    "  " ident attrs? (("--" | "->") ident attrs?)? ";\n" |
+    "  subgraph " ident " {\n" stmt* "}\n" |
+    "  rankdir=\"" [A-Z] [A-Z] "\"\n"
+substmt ::= "    " ident attrs? (("--" | "-->") ident attrs?)? ";\n"
+ident ::= [a-zA-Z\x80-ÿ_] [a-zA-Z\x80-ÿ_0-9]*
+attrs ::= "[" (attr ("," attr)*)?  "]"
+attr  ::= [a-z]+ "=" ("\"" [ a-zA-Z\x80-ÿ_0-9]* "\"" | [0-9]+)

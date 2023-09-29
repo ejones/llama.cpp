@@ -1,0 +1,31 @@
+root        ::=  graph
+graph       ::= ( "strict" req-ws )? ( "graph" | "digraph" ) req-ws id? "{" ws stmt-list "}" ws
+stmt-list   ::= ( stmt ";" ws )*
+stmt        ::= node-stmt | edge-stmt | attr-stmt | id "=" ws id | subgraph
+attr-stmt   ::= ( "graph" | "node" | "edge" ) req-ws attr-list
+attr-list   ::= "[" ws a-list? "]" ws attr-list?
+a-list      ::= (id "=" ws id [;,] ws)+
+edge-stmt   ::= ( node-id | subgraph ) edgeRHS attr-list?
+edgeRHS     ::= (edgeop ( node-id | subgraph ))+
+node-stmt   ::= node-id attr-list?
+node-id     ::= id port?
+port        ::= ":" ws id (":" ws compass-pt)? | ":" ws compass-pt
+subgraph    ::= ("subgraph" req-ws id?)?  "{" ws stmt-list "}" ws
+compass-pt  ::= ( "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw" | "c" | "_" ) ws
+edgeop      ::= ("->" | "--") ws
+
+id          ::= string | number | quoted-string
+
+# A string of alphabetic characters, underscores or digits, not beginning with a digit
+string      ::= [a-zA-Z\x80-ÿ_] [a-zA-Z\x80-ÿ_0-9]* ws
+
+# A numeral
+number      ::= ("-"? ("." [0-9]+ | [0-9]+ ("." [0-9]*)?)) ws
+
+# Any double-quoted string ("...") possibly containing escaped quotes (\")
+quoted-string ::= "\"" ([^"\\] | "\\\"")* "\"" ws
+
+# space: by convention, applied in this grammar after literal chars when allowed
+indent      ::= [ \t] ([ \t] ([ \t] ([ \t] ([ \t] [ \t]?)?)?)?)?
+req-ws      ::= "\n" indent? | indent
+ws          ::= req-ws?
